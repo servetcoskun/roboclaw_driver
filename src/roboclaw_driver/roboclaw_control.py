@@ -68,6 +68,7 @@ class RoboclawDiagnostics:
         self.main_battery_v = None
         self.logic_battery_v = None
         self.error_messages = []
+        self.m1_velocity = None
 
 
 class RoboclawControl:

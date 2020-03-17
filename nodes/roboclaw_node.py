@@ -1,25 +1,32 @@
 #!/usr/bin/env python
 
 from __future__ import print_function
+from math import pi, cos, sin
+
 import traceback
 import threading
 
 import rospy
 import diagnostic_updater
 import diagnostic_msgs
+import tf
 
 from roboclaw_driver.msg import Stats, SpeedCommand
 from roboclaw_driver import RoboclawControl, Roboclaw, RoboclawStub
+
+from geometry_msgs.msg import Point, Pose, Quaternion, Twist, Vector3
+from nav_msgs.msg import Odometry
 
 
 DEFAULT_DEV_NAMES = "/dev/ttyACM0"
 DEFAULT_BAUD_RATE = 115200
 DEFAULT_NODE_NAME = "roboclaw"
-DEFAULT_LOOP_HZ = 100
+DEFAULT_LOOP_HZ = 10
 DEFAULT_ADDRESS = 0x80
 DEFAULT_DEADMAN_SEC = 3
 DEFAULT_STATS_TOPIC = "~stats"
 DEFAULT_SPEED_CMD_TOPIC = "~speed_command"
+DEFAULT_ODOM_TOPIC = "~odom"
 
 
 class RoboclawNode:
@@ -41,12 +48,31 @@ class RoboclawNode:
         self._last_cmd_max_secs = 0
         self._speed_cmd_lock = threading.RLock()  # To serialize access to cmd variables
 
+        # Setup encoder parameters
+        self._ticks_pr_meter = 4342.2
+        self._base_width = 20.0
+        self._last_enc_left = 0
+        self._last_enc_right = 0
+        self._last_enc_time = rospy.get_rostime()
+
+
+        # Setup position parameters
+        self._x = 0
+        self._y = 0
+        self._th = 0.0
+
         # Set up the Publishers
         self._stats_pub = rospy.Publisher(
             rospy.get_param("~stats_topic", DEFAULT_STATS_TOPIC),
             Stats,
             queue_size=1
         )
+
+        # Set up odometry publisher
+        self._odom_pub = rospy.Publisher("odom", Odometry, queue_size=50)
+
+        # Set up odometry-tf broadcaster
+        self._odom_broadcaster = tf.TransformBroadcaster()
 
         # Set up the Diagnostic Updater
         self._diag_updater = diagnostic_updater.Updater()
@@ -117,11 +143,110 @@ class RoboclawNode:
 
                 # Publish diagnostics
                 self._diag_updater.update()
+                
+                # Update
+                enc_left = stats.m1_enc_val 
+                enc_right = stats.m2_enc_val
+                self._publish_update(enc_left, enc_right)
+
+                # Publish odometry data
+                #self._publish_odom(0,0,0,0,0,0)
 
                 looprate.sleep()
 
         except rospy.ROSInterruptException:
             rospy.logwarn("ROSInterruptException received in main loop")
+
+    @staticmethod
+    def normalize_angle(angle):
+        while angle > pi:
+            angle -= 2.0 * pi
+        while angle < -pi:
+            angle += 2.0 * pi
+        return angle
+
+    def update(self, enc_left, enc_right):
+        left_ticks = enc_left - self._last_enc_left
+        right_ticks = enc_right - self._last_enc_right
+
+        self._last_enc_left = enc_left
+        self._last_enc_right = enc_right
+
+        dist_l = left_ticks / self._ticks_pr_meter
+        dist_r = right_ticks / self._ticks_pr_meter
+        dist = (dist_l + dist_r) / 2.0
+
+        t = rospy.get_rostime()
+        dt = (t - self._last_enc_time).to_sec()
+        self._last_enc_time = t
+
+        if left_ticks == right_ticks:
+            dist_th = 0.0
+            self._x += dist * cos(self._th)
+            self._y += dist * sin(self._th)
+        else:
+            dist_th = (dist_r - dist_l) / self._base_width
+            r = dist / dist_th
+            self._x += r * (sin(dist_th + self._th) - sin(self._th))
+            self._y -= r * (cos(dist_th + self._th) - cos(self._th))
+            self._th = self.normalize_angle(self._th + dist_th)
+
+        if abs(dt) < 0.000001:
+            vel_x = 0.0
+            vel_th = 0.0
+        else:
+            vel_x = dist / dt
+            vel_th = dist_th / dt
+
+        return vel_x, vel_th
+
+    def _publish_update(self, enc_left, enc_right):
+        # 2106 per 0.1 seconds is max speed, error in the 16th bit is 32768
+        # TODO lets find a better way to deal with this error
+        if abs(enc_left - self._last_enc_left) > 20000:
+            rospy.logerr("Ignoring left encoder jump: cur %d, last %d" % (enc_left, self._last_enc_left))
+        elif abs(enc_right - self._last_enc_right) > 20000:
+            rospy.logerr("Ignoring right encoder jump: cur %d, last %d" % (enc_right, self._last_enc_right))
+        else:
+            vel_x, vel_theta = self.update(enc_left, enc_right)
+            self._publish_odom(self._x, self._y, self._th, vel_x, vel_theta)
+
+
+    def _publish_odom(self, x, y, th, vx, vth):
+        
+        odom = Odometry()
+        odom.header.stamp = rospy.get_rostime()
+        odom.header.frame_id = "odom"
+
+        odom_quat = tf.transformations.quaternion_from_euler(0, 0, -vth)
+
+        # set the position
+        odom.pose.pose = Pose(Point(x, y, 0.0), Quaternion(*odom_quat))
+        
+        odom.pose.covariance[0] = 0.01
+        odom.pose.covariance[7] = 0.01
+        odom.pose.covariance[14] = 99999
+        odom.pose.covariance[21] = 99999
+        odom.pose.covariance[28] = 99999
+        odom.pose.covariance[35] = 0.01
+
+
+        # publish the transform over tf
+        self._odom_broadcaster.sendTransform(
+            (x, y, 0),
+            odom_quat,
+            rospy.get_rostime(),
+            "base_link",
+            "odom"
+        )
+        
+        # set the velocity
+        odom.child_frame_id = "base_link"
+        odom.twist.twist = Twist(Vector3(vx, 0, 0), Vector3(0, 0, vth))
+        odom.twist.covariance = odom.pose.covariance
+
+        # publish the message
+        self._odom_pub.publish(odom)
 
     def _publish_stats(self, stats):
         """Publish stats to the <node_name>/stats topic
@@ -211,6 +336,8 @@ class RoboclawNode:
         """
         rospy.loginfo("Shutting down...")
 
+
+# --------------------------------------------------------------------------------
 
 if __name__ == "__main__":
 

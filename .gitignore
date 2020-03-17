@@ -100,3 +100,6 @@ ENV/
 
 # mypy
 .mypy_cache/
+._.DS_Store
+.DS_Store
+src/roboclaw_driver/.roboclaw_stub.py.swp

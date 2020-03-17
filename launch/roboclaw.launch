@@ -7,7 +7,7 @@
     <arg name="name"            default="roboclaw"                  />
     <arg name="test_mode"       default="false"                     />
     <arg name="dev_names"       default="/dev/ttyACM0"              />
-    <arg name="baud"            default="115200"                    />
+    <arg name="baud"            default="38400"                    />
     <arg name="address"         default="128"                       />
     <arg name="loop_hz"         default="10"                        />
     <arg name="deadman_secs"    default="3"                         />
