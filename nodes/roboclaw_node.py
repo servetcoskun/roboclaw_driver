@@ -11,7 +11,7 @@ import diagnostic_updater
 import diagnostic_msgs
 import tf
 
-from roboclaw_driver.msg import Stats, SpeedCommand
+from roboclaw_driver.msg import Stats, SpeedCmd
 from roboclaw_driver import RoboclawControl, Roboclaw, RoboclawStub
 
 from geometry_msgs.msg import Point, Pose, Quaternion, Twist, Vector3
@@ -33,28 +33,29 @@ class RoboclawNode:
     def __init__(self, node_name):
         """
         Parameters:
-            :param str node_name: ROS node name
-            :param RoboclawControl rbc_ctl: RoboclawControl object that controls the hardware
-            :param int loop_rate: Integer rate in Hz of the main loop
+            :str node_name: ROS node name
+            :RoboclawControl rbc_ctl: RoboclawControl obj. controlling hardware
+            :int loop_rate: Integer rate in Hz of the main loop
         """
         self._node_name = node_name
         self._rbc_ctls = []  # Populated by the connect() method
 
         # Records the values of the last speed command
-        self._last_cmd_time = rospy.get_rostime()
-        self._last_cmd_m1_qpps = 0
-        self._last_cmd_m2_qpps = 0
-        self._last_cmd_accel = 0
-        self._last_cmd_max_secs = 0
-        self._speed_cmd_lock = threading.RLock()  # To serialize access to cmd variables
+        self._p_cmd_time = rospy.get_rostime()
+        self._p_cmd_m1_qpps = 0
+        self._p_cmd_m2_qpps = 0
+        self._p_cmd_accel = 0
+        self._p_cmd_max_secs = 0
+
+        # Serialize access to cmd variables
+        self._speed_cmd_lock = threading.RLock()
 
         # Setup encoder parameters
         self._ticks_pr_meter = 4342.2
-        self._base_width = 20.0
-        self._last_enc_left = 0
-        self._last_enc_right = 0
-        self._last_enc_time = rospy.get_rostime()
-
+        self._base_width = 0.315
+        self._p_enc_left = 0
+        self._p_enc_right = 0
+        self._p_enc_time = rospy.get_rostime()
 
         # Setup position parameters
         self._x = 0
@@ -79,10 +80,10 @@ class RoboclawNode:
         self._diag_updater.setHardwareID(node_name)
         self._diag_updater.add("Read Diagnostics", self._publish_diagnostics)
 
-        # Set up the SpeedCommand Subscriber
+        # Set up the SpeedCmd Subscriber
         rospy.Subscriber(
             rospy.get_param("~speed_cmd_topic", DEFAULT_SPEED_CMD_TOPIC),
-            SpeedCommand,
+            SpeedCmd,
             self._speed_cmd_callback
         )
 
@@ -100,7 +101,7 @@ class RoboclawNode:
             :param str dev_name: Serial device name (e.g. /dev/ttyACM0)
             :param int baud_rate: Serial baud rate (e.g. 115200)
             :param int address: Serial address (default 0x80)
-            :param bool test_mode: True if connecting to the controller test stub
+            :param bool test_mode: if connecting to the controller test stub
         """
         rospy.loginfo("Connecting to roboclaw")
         if not test_mode:
@@ -113,7 +114,7 @@ class RoboclawNode:
         """Runs the main loop of the node
         Parameters:
             :param int loop_hz: Loops per sec of main loop (default 10 hertz)
-            :param int deadman_secs: Seconds that the Roboclaw will continue the last command
+            :param int deadman_secs: time before Roboclaw will cont. last cmd
                 before stopping if another command is not received
         """
         rospy.loginfo("Running node")
@@ -123,7 +124,8 @@ class RoboclawNode:
             rospy.loginfo("Starting main loop")
 
             while not rospy.is_shutdown():
-
+                # ros time for later use
+                rtime = rospy.get_rostime()
                 # Read and publish encoder readings
                 read_success, stats = self._rbc_ctls[0].read_stats()
                 for error in stats.error_messages:
@@ -131,26 +133,29 @@ class RoboclawNode:
                 if read_success:
                     self._publish_stats(stats)
                 else:
-                    rospy.logwarn("Error reading stats from Roboclaw: {}".format(stats))
+                    rospy.logwarn(
+                        "Error reading stats from Roboclaw: {}".format(stats))
 
                 # Stop motors if running and no commands are being received
                 if (stats.m1_enc_qpps != 0 or stats.m2_enc_qpps != 0):
-                    if (rospy.get_rostime() - self._last_cmd_time).to_sec() > deadman_secs:
-                        rospy.loginfo("Did not receive a command for over 1 sec: Stopping motors")
-                        decel = max(abs(stats.m1_enc_qpps), abs(stats.m2_enc_qpps)) * 2
+                    if (rtime - self._p_cmd_time).to_sec() > deadman_secs:
+                        rospy.loginfo(
+                            "No cmd for over 1 sec: Stopping motors")
+                        m1_enc_qpps_abs = abs(stats.m1_enc_qpps)
+                        m2_enc_qpps_abs = abs(stats.m2_enc_qpps)
+                        decel = max(m1_enc_qpps_abs, m2_enc_qpps_abs) * 2
                         for rbc_ctl in self._rbc_ctls:
                             rbc_ctl.stop(decel=decel)
 
                 # Publish diagnostics
                 self._diag_updater.update()
-                
                 # Update
-                enc_left = stats.m1_enc_val 
+                enc_left = stats.m1_enc_val
                 enc_right = stats.m2_enc_val
                 self._publish_update(enc_left, enc_right)
 
                 # Publish odometry data
-                #self._publish_odom(0,0,0,0,0,0)
+                # self._publish_odom(0,0,0,0,0,0)
 
                 looprate.sleep()
 
@@ -166,19 +171,19 @@ class RoboclawNode:
         return angle
 
     def update(self, enc_left, enc_right):
-        left_ticks = enc_left - self._last_enc_left
-        right_ticks = enc_right - self._last_enc_right
+        left_ticks = enc_left - self._p_enc_left
+        right_ticks = enc_right - self._p_enc_right
 
-        self._last_enc_left = enc_left
-        self._last_enc_right = enc_right
+        self._p_enc_left = enc_left
+        self._p_enc_right = enc_right
 
         dist_l = left_ticks / self._ticks_pr_meter
         dist_r = right_ticks / self._ticks_pr_meter
         dist = (dist_l + dist_r) / 2.0
 
         t = rospy.get_rostime()
-        dt = (t - self._last_enc_time).to_sec()
-        self._last_enc_time = t
+        dt = (t - self._p_enc_time).to_sec()
+        self._p_enc_time = t
 
         if left_ticks == right_ticks:
             dist_th = 0.0
@@ -203,17 +208,19 @@ class RoboclawNode:
     def _publish_update(self, enc_left, enc_right):
         # 2106 per 0.1 seconds is max speed, error in the 16th bit is 32768
         # TODO lets find a better way to deal with this error
-        if abs(enc_left - self._last_enc_left) > 20000:
-            rospy.logerr("Ignoring left encoder jump: cur %d, last %d" % (enc_left, self._last_enc_left))
-        elif abs(enc_right - self._last_enc_right) > 20000:
-            rospy.logerr("Ignoring right encoder jump: cur %d, last %d" % (enc_right, self._last_enc_right))
+        if abs(enc_left - self._p_enc_left) > 20000:
+            rospy.logerr(
+                "Ignoring left enc. jump: cur %d, prev. %d"
+                % (enc_left, self._p_enc_left))
+        elif abs(enc_right - self._p_enc_right) > 20000:
+            rospy.logerr(
+                "Ignoring right enc. jump: cur %d, prev. %d"
+                % (enc_right, self._p_enc_right))
         else:
             vel_x, vel_theta = self.update(enc_left, enc_right)
             self._publish_odom(self._x, self._y, self._th, vel_x, vel_theta)
 
-
     def _publish_odom(self, x, y, th, vx, vth):
-        
         odom = Odometry()
         odom.header.stamp = rospy.get_rostime()
         odom.header.frame_id = "odom"
@@ -222,14 +229,12 @@ class RoboclawNode:
 
         # set the position
         odom.pose.pose = Pose(Point(x, y, 0.0), Quaternion(*odom_quat))
-        
         odom.pose.covariance[0] = 0.01
         odom.pose.covariance[7] = 0.01
         odom.pose.covariance[14] = 99999
         odom.pose.covariance[21] = 99999
         odom.pose.covariance[28] = 99999
         odom.pose.covariance[35] = 0.01
-
 
         # publish the transform over tf
         self._odom_broadcaster.sendTransform(
@@ -239,7 +244,6 @@ class RoboclawNode:
             "base_link",
             "odom"
         )
-        
         # set the velocity
         odom.child_frame_id = "base_link"
         odom.twist.twist = Twist(Vector3(vx, 0, 0), Vector3(0, 0, vth))
@@ -252,7 +256,8 @@ class RoboclawNode:
         """Publish stats to the <node_name>/stats topic
 
         Parameters:
-            :param roboclaw_control.RoboclawStats stats: Stats from the Roboclaw controller
+            :param roboclaw_control.RoboclawStats stats: Stats from
+            the Roboclaw controller
         """
         msg = Stats()
         msg.header.stamp = rospy.get_rostime()
@@ -301,35 +306,39 @@ class RoboclawNode:
 
         return stat
 
-    def _speed_cmd_callback(self, command):
+    def _speed_cmd_callback(self, cmd):
         """
         Parameters:
-            :param SpeedCommand command: The forward/turn command message
+            :param Speedcmd cmd: The forward/turn cmd message
         """
         with self._speed_cmd_lock:
-            self._last_cmd_time = rospy.get_rostime()
+            self._p_cmd_time = rospy.get_rostime()
 
-            # Skip if the new command is not different than the last command
-            if (command.m1_qpps == self._last_cmd_m1_qpps
-                and command.m2_qpps == self._last_cmd_m2_qpps
-                and command.accel == self._last_cmd_accel
-                and command.max_secs == self._last_cmd_max_secs):
-                rospy.logdebug("Speed Command received, but no change in command values")
+            # Skip if the new cmd is not different than the last cmd
+            if (cmd.m1_qpps == self._p_cmd_m1_qpps
+                    and cmd.m2_qpps == self._p_cmd_m2_qpps
+                    and cmd.accel == self._p_cmd_accel
+                    and cmd.max_secs == self._p_cmd_max_secs):
+
+                rospy.logdebug(
+                    "Got Speed Cmd, but no change in cmd values")
 
             else:
                 rospy.logdebug(
                     "M1 speed: {} | M2 speed: {} | Accel: {} | Max Secs: {}"
-                    .format(command.m1_qpps, command.m2_qpps, command.accel, command.max_secs)
+                    .format(cmd.m1_qpps, cmd.m2_qpps, cmd.accel, cmd.max_secs)
                 )
 
                 for rbc_ctl in self._rbc_ctls:
                     success = rbc_ctl.driveM1M2qpps(
-                        command.m1_qpps, command.m2_qpps,
-                        command.accel, command.max_secs
+                        cmd.m1_qpps, cmd.m2_qpps,
+                        cmd.accel, cmd.max_secs
                     )
 
                     if not success:
-                        rospy.logerr("RoboclawControl SpeedAccelDistanceM1M2 failed")
+                        rospy.logerr(
+                            "RoboclawControl SpeedAccelDistanceM1M2 failed"
+                            )
 
     def shutdown_node(self):
         """Performs Node shutdown tasks
@@ -372,8 +381,12 @@ if __name__ == "__main__":
         node.run(loop_hz=loop_hz, deadman_secs=DEFAULT_DEADMAN_SEC)
 
     except Exception as e:
-        rospy.logfatal("Unhandled exeption...printing stack trace then shutting down node")
-        rospy.logfatal(traceback.format_exc())
+        rospy.logfatal(
+            "Unhandled exeption...printing stack trace then shutting down node"
+            )
+        rospy.logfatal(
+            traceback.format_exc()
+            )
 
     # Shutdown and cleanup
     if node:
