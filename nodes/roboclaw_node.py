@@ -88,8 +88,8 @@ class RoboclawNode:
         )
 
         # For logdebug
-        self.prev_m1_val = 0
-        self.prev_m2_val = 0
+        self.p_m1_val = 0
+        self.p_m2_val = 0
 
     @property
     def roboclaw_control(self):
@@ -225,7 +225,16 @@ class RoboclawNode:
         odom.header.stamp = rospy.get_rostime()
         odom.header.frame_id = "odom"
 
-        odom_quat = tf.transformations.quaternion_from_euler(0, 0, -vth)
+        odom_quat = tf.transformations.quaternion_from_euler(0, 0, th)
+
+        # publish the transform over tf
+        self._odom_broadcaster.sendTransform(
+            (x, y, 0),
+            -odom_quat,
+            rospy.get_rostime(),
+            "base_link",
+            "odom"
+        )
 
         # set the position
         odom.pose.pose = Pose(Point(x, y, 0.0), Quaternion(*odom_quat))
@@ -236,14 +245,6 @@ class RoboclawNode:
         odom.pose.covariance[28] = 99999
         odom.pose.covariance[35] = 0.01
 
-        # publish the transform over tf
-        self._odom_broadcaster.sendTransform(
-            (x, y, 0),
-            odom_quat,
-            rospy.get_rostime(),
-            "base_link",
-            "odom"
-        )
         # set the velocity
         odom.child_frame_id = "base_link"
         odom.twist.twist = Twist(Vector3(vx, 0, 0), Vector3(0, 0, vth))
@@ -269,11 +270,11 @@ class RoboclawNode:
         msg.m2_enc_qpps = stats.m2_enc_qpps
 
         # rospy.logdebug("Encoder diffs M1:{}, M2:{}".format(
-        #     stats.m1_enc_val - self.prev_m1_val,
-        #     stats.m2_enc_val - self.prev_m2_val
+        #     stats.m1_enc_val - self.p_m1_val,
+        #     stats.m2_enc_val - self.p_m2_val
         # ))
-        self.prev_m1_val = stats.m1_enc_val
-        self.prev_m2_val = stats.m2_enc_val
+        self.p_m1_val = stats.m1_enc_val
+        self.p_m2_val = stats.m2_enc_val
 
         self._stats_pub.publish(msg)
 
