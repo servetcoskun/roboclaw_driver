@@ -1,0 +1,27 @@
+<?xml version="1.0"?>
+<robot name="watney" xmlns:xacro="http://www.ros.org/wiki/xacro">
+
+    <xacro:include filename="$(find roboclaw_driver)/urdf/physical.xacro" />
+    <xacro:include filename="$(find roboclaw_driver)/urdf/materials.xacro" />
+    <xacro:include filename="$(find roboclaw_driver)/urdf/functions.xacro" />
+    <xacro:include filename="$(find roboclaw_driver)/urdf/joints.xacro" />
+
+
+    <link name="base_link" />
+
+	<link name="baseplate">
+		<visual>
+			<material name="acrylic"/>
+			<xacro:baseplate_geometry/>
+		</visual>
+		<collision>
+			<xacro:baseplate_geometry/>
+		</collision>
+		<inertial>
+			<xacro:baseplate_inertial/>
+		</inertial>
+	</link>
+
+    <xacro:fixed_offset_joint parent="base_link" child="baseplate" offset="0 0 0"/>
+	
+</robot>

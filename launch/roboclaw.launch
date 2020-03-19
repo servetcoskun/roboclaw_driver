@@ -3,7 +3,9 @@
     This is the production launch file to be used with the real roboclaw device.
 -->
  <launch>
-
+    
+    <param name="robot_description" command="$(find xacro)/xacro '$(find roboclaw_driver)/urdf/watney.xacro'" />
+    
     <arg name="name"            default="roboclaw"                  />
     <arg name="test_mode"       default="false"                     />
     <arg name="dev_names"       default="/dev/ttyACM0"              />
@@ -25,5 +27,6 @@
         <param name="speed_cmd_topic" type="str" value="$(arg speed_cmd_topic)" />
         <param name="stats_topic" type="str" value="$(arg stats_topic)" />
     </node>
+    
 
 </launch>

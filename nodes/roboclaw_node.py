@@ -9,12 +9,19 @@ import threading
 import rospy
 import diagnostic_updater
 import diagnostic_msgs
-import tf
+# import tf
+import tf2_ros
+import tf_conversions
 
 from roboclaw_driver.msg import Stats, SpeedCmd
 from roboclaw_driver import RoboclawControl, Roboclaw, RoboclawStub
 
 from geometry_msgs.msg import Point, Pose, Quaternion, Twist, Vector3
+# Flake 8 compliant ;)
+from geometry_msgs.msg import TransformStamped, Transform
+from std_msgs.msg import Header
+
+
 from nav_msgs.msg import Odometry
 
 
@@ -27,6 +34,10 @@ DEFAULT_DEADMAN_SEC = 3
 DEFAULT_STATS_TOPIC = "~stats"
 DEFAULT_SPEED_CMD_TOPIC = "~speed_command"
 DEFAULT_ODOM_TOPIC = "~odom"
+
+# Robot specific parameters
+BASE_LINK_HEIGHT = 0.20
+WHEEL_RADIUS = 0.10
 
 
 class RoboclawNode:
@@ -69,11 +80,14 @@ class RoboclawNode:
             queue_size=1
         )
 
+        self.tf_pub = tf2_ros.TransformBroadcaster()
+
         # Set up odometry publisher
         self._odom_pub = rospy.Publisher("odom", Odometry, queue_size=50)
 
-        # Set up odometry-tf broadcaster
-        self._odom_broadcaster = tf.TransformBroadcaster()
+        # Set up odometry-baselink broadcaster
+        self._odom_broadcaster = tf2_ros.TransformBroadcaster()
+        self._wheels_broadcaster = tf2_ros.TransformBroadcaster()
 
         # Set up the Diagnostic Updater
         self._diag_updater = diagnostic_updater.Updater()
@@ -153,7 +167,7 @@ class RoboclawNode:
                 enc_left = stats.m1_enc_val
                 enc_right = stats.m2_enc_val
                 self._publish_update(enc_left, enc_right)
-
+                # self._publish_wheel_tf()
                 # Publish odometry data
                 # self._publish_odom(0,0,0,0,0,0)
 
@@ -220,38 +234,60 @@ class RoboclawNode:
             vel_x, vel_theta = self.update(enc_left, enc_right)
             self._publish_odom(self._x, self._y, self._th, vel_x, vel_theta)
 
+    def _publish_wheel_tf(self):
+        self._wheels_broadcaster.sendTransform((0.4, 0.4, -WHEEL_RADIUS),
+                                               (0.0, 0.0, 0.0, 1.0),
+                                               rospy.get_rostime(),
+                                               "front_lwheel",
+                                               "base_link")
+
+        self._wheels_broadcaster.sendTransform((-0.4, 0.4, -WHEEL_RADIUS),
+                                               (0.0, 0.0, 0.0, 1.0),
+                                               rospy.get_rostime(),
+                                               "back_lwheel",
+                                               "base_link")
+
+        self._wheels_broadcaster.sendTransform((0.4, -0.4, -WHEEL_RADIUS),
+                                               (0.0, 0.0, 1.0, 0.0),
+                                               rospy.get_rostime(),
+                                               "front_rwheel",
+                                               "base_link")
+
+        self._wheels_broadcaster.sendTransform((-0.4, -0.4, -WHEEL_RADIUS),
+                                               (0.0, 0.0, 1.0, 0.0),
+                                               rospy.get_rostime(),
+                                               "back_rwheel",
+                                               "base_link")
+
     def _publish_odom(self, x, y, th, vx, vth):
         odom = Odometry()
         odom.header.stamp = rospy.get_rostime()
-        odom.header.frame_id = "odom"
+        odom.header.frame_id = "map"
+        odom.child_frame_id = "base_link"
 
-        odom_quat = tf.transformations.quaternion_from_euler(0, 0, th)
+        # read the position
+        odom_quat = tf_conversions.transformations.quaternion_from_euler(0, 0, th)
+        odom.pose.pose = Pose(Point(x, y, 0.0), Quaternion(*odom_quat))
 
-        # publish the transform over tf
-        self._odom_broadcaster.sendTransform(
-            (x, y, 0),
-            -odom_quat,
-            rospy.get_rostime(),
-            "base_link",
-            "odom"
+        # read the velocity
+        odom.twist.twist = Twist(Vector3(vx, 0, 0), Vector3(0, 0, vth))
+
+        tf = TransformStamped(
+            header=Header(
+                frame_id=odom.header.frame_id,
+            ),
+            child_frame_id=odom.child_frame_id,
+            transform=Transform(
+                translation=odom.pose.pose.position,
+                rotation=odom.pose.pose.orientation
+            )
         )
 
-        # set the position
-        odom.pose.pose = Pose(Point(x, y, 0.0), Quaternion(*odom_quat))
-        odom.pose.covariance[0] = 0.01
-        odom.pose.covariance[7] = 0.01
-        odom.pose.covariance[14] = 99999
-        odom.pose.covariance[21] = 99999
-        odom.pose.covariance[28] = 99999
-        odom.pose.covariance[35] = 0.01
-
-        # set the velocity
-        odom.child_frame_id = "base_link"
-        odom.twist.twist = Twist(Vector3(vx, 0, 0), Vector3(0, 0, vth))
-        odom.twist.covariance = odom.pose.covariance
+        self._odom_pub.publish(odom)
+        self.tf_pub.sendTransform(tf)
 
         # publish the message
-        self._odom_pub.publish(odom)
+        # self._odom_pub.publish(odom)
 
     def _publish_stats(self, stats):
         """Publish stats to the <node_name>/stats topic
